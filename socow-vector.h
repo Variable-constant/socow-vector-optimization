@@ -46,7 +46,7 @@ struct socow_vector {
         size_ = 0;
     }
 
-    T& operator[](size_t i) noexcept {
+    T& operator[](size_t i) {
         if (!small && s->counter > 1)
             realloc(s->capacity, my_begin(), my_end(), s);
         return *(my_begin() + i);
@@ -70,7 +70,7 @@ struct socow_vector {
         return size_;
     }
 
-    T& front() noexcept {
+    T& front() {
         if (!small && s->counter > 1)
             realloc(s->capacity, my_begin(), my_end(), s);
         return *my_begin();
@@ -80,7 +80,7 @@ struct socow_vector {
         return *begin();
     }
 
-    T& back() noexcept {
+    T& back() {
         if (!small && s->counter > 1)
             realloc(s->capacity, my_begin(), my_end(), s);
         return *(my_end() - 1);
@@ -202,9 +202,6 @@ struct socow_vector {
 
     iterator insert(const_iterator pos, T const& e) {
         size_t index = pos - my_begin();
-        if (!small && s->counter > 1) {
-            realloc(s->capacity, my_begin(), my_end(), s);
-        }
         push_back(e);
         for (size_t i = size_ - 1; i > index; i--) {
             std::swap(*(my_begin() + i), *(my_begin() + i - 1));
