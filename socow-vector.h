@@ -37,7 +37,8 @@ struct socow_vector {
         } else {
             if (s->counter == 1) {
                 destruct_range(my_begin(), my_end());
-                s->~storage();
+                operator delete(s->data_);
+                operator delete(s);
             } else {
                 s->counter--;
             }
