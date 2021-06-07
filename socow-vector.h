@@ -220,6 +220,10 @@ struct socow_vector {
     }
 
 private:
+    struct storage {
+        size_t capacity{0};
+        std::shared_ptr<T> data_{nullptr};
+    };
     void update_before_changes() {
         if (!small && !s.data_.unique())
             realloc(s.capacity, my_begin(), my_end(), s);
@@ -294,10 +298,6 @@ private:
             it->~T();
         }
     }
-    struct storage {
-        size_t capacity{0};
-        std::shared_ptr<T> data_{nullptr};
-    };
     union {
         std::array<T, SMALL_SIZE> static_storage;
         storage s;
