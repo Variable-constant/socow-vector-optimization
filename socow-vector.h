@@ -1,7 +1,6 @@
 #pragma once
 #include <cstddef>
 #include <array>
-#include "storage.h"
 
 template <typename T, size_t SMALL_SIZE>
 struct socow_vector {
@@ -11,12 +10,11 @@ struct socow_vector {
     socow_vector() noexcept
         : size_(0), small(true) {}
 
-    socow_vector(socow_vector const& that) {
+    socow_vector(socow_vector const& that) : socow_vector() {
         if (that.small) {
-            static_storage = that.static_storage;
+            copy(const_cast<T*>(that.static_storage.begin()), const_cast<T*>(that.static_storage.end()), static_storage.begin());
         } else {
-            s = that.s;
-            s->counter++;
+            new(&s) storage(that.s);
         }
         size_ = that.size_;
         small = that.small;
@@ -34,21 +32,17 @@ struct socow_vector {
     ~socow_vector() {
         if (small) {
             destruct_range(my_begin(), my_end());
+        } else if (s.data_.unique()) {
+            destruct_range(my_begin(), my_end());
+            s.data_.~shared_ptr();
         } else {
-            if (s->counter == 1) {
-                destruct_range(my_begin(), my_end());
-                operator delete(s->data_);
-                operator delete(s);
-            } else {
-                s->counter--;
-            }
+            s.data_ = nullptr;
         }
         size_ = 0;
     }
 
     T& operator[](size_t i) {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
+        update_before_changes();
         return *(my_begin() + i);
     }
 
@@ -57,13 +51,12 @@ struct socow_vector {
     }
 
     T* data() {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
-        return (small ? static_storage.begin() : s->data_);
+        update_before_changes();
+        return (small ? static_storage.begin() : s.data_.get());
     }
 
     T const* data() const noexcept {
-        return (small ? static_storage.begin() : s->data_);
+        return (small ? static_storage.begin() : s.data_.get());
     }
 
     size_t size() const noexcept {
@@ -71,8 +64,7 @@ struct socow_vector {
     }
 
     T& front() {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
+        update_before_changes();
         return *my_begin();
     }
 
@@ -81,8 +73,7 @@ struct socow_vector {
     }
 
     T& back() {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
+        update_before_changes();
         return *(my_end() - 1);
     }
     T const& back() const noexcept {
@@ -93,17 +84,17 @@ struct socow_vector {
             new (my_end()) T(e);
         } else {
             if (small) {
-                auto* new_st = new storage<T>;
+                storage new_st;
                 realloc(SMALL_SIZE * 2, my_begin(), my_end(), new_st);
                 destruct_range(my_begin(), my_end());
                 T tmp = e;
-                s = new_st;
+                new(&s) storage(new_st);
                 small = false;
                 new(my_end()) T(tmp);
             } else {
-                if (s->capacity == size_ || s->counter > 1) {
+                if (s.capacity == size_ || !s.data_.unique()) {
                     T tmp = e;
-                    realloc((s->capacity * (s->capacity == size_ ? 2 : 1)), my_begin(), my_end(), s);
+                    realloc((s.capacity * (s.capacity == size_ ? 2 : 1)), my_begin(), my_end(), s);
                     new (my_end()) T(tmp);
                 } else {
                     new (my_end()) T(e);
@@ -113,10 +104,13 @@ struct socow_vector {
         ++size_;
     }
     void pop_back() {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
+        update_before_changes();
         size_--;
         my_end()->~T();
+//        с этим не проходит shrink_to_fit shrink_to_fit_2 в small_object
+//        if (size_ <= SMALL_SIZE && !small) {
+//            big_to_small();
+//        }
     }
 
     bool empty() const noexcept {
@@ -124,24 +118,28 @@ struct socow_vector {
     }
 
     size_t capacity() const noexcept {
-        return (small ? SMALL_SIZE : s->capacity);
+        return (small ? SMALL_SIZE : s.capacity);
     }
 
     void reserve(size_t new_cap) {
         if (small && new_cap > SMALL_SIZE) {
-            auto* new_st = new storage<T>;
+            storage new_st;
             realloc(new_cap, my_begin(), my_end(), new_st);
             destruct_range(my_begin(), my_end());
-            s = new_st;
+            new(&s) storage(new_st);
             small = false;
-        } else if (!small && (new_cap > s->capacity || (new_cap >= size_ && s->counter > 1))) {
+        } else if (!small && (new_cap > s.capacity || (new_cap >= size_ && !s.data_.unique()))) {
             realloc(new_cap, my_begin(), my_end(), s);
         }
     }
 
     void shrink_to_fit() {
-        if (!small && size_ != s->capacity) {
-            realloc(std::max(size_, SMALL_SIZE), my_begin(), my_end(), s);
+        if (!small) {
+            if (size_ <= SMALL_SIZE) {
+                big_to_small();
+            } else if (size_ != s.capacity) {
+                realloc(size_, my_begin(), my_end(), s);
+            }
         }
     }
 
@@ -155,16 +153,12 @@ struct socow_vector {
             for (size_t i = 0; i < std::min(size_, that.size_); i++) {
                 std::swap(static_storage[i], that.static_storage[i]);
             }
-            try {
-                if (size_ < that.size_) {
-                    copy(that.static_storage.begin() + size_, that.static_storage.begin() + that.size_, static_storage.begin() + size_);
-                    destruct_range(that.static_storage.begin() + size_, that.static_storage.begin() + that.size_);
-                } else {
-                    copy(static_storage.begin() + that.size_, static_storage.begin() + size_, that.static_storage.begin() + that.size_);
-                    destruct_range(static_storage.begin() + that.size_, static_storage.begin() + size_);
-                }
-            } catch (...) {
-                throw;
+            if (size_ < that.size_) {
+                copy(that.static_storage.begin() + size_, that.static_storage.begin() + that.size_, static_storage.begin() + size_);
+                destruct_range(that.static_storage.begin() + size_, that.static_storage.begin() + that.size_);
+            } else {
+                copy(static_storage.begin() + that.size_, static_storage.begin() + size_, that.static_storage.begin() + that.size_);
+                destruct_range(static_storage.begin() + that.size_, static_storage.begin() + size_);
             }
         } else if (!small && !that.small) {
             std::swap(that.s, s);
@@ -177,15 +171,14 @@ struct socow_vector {
         std::swap(small, that.small);
     }
     iterator my_begin() {
-        return (small ? static_storage.begin() : s->data_);
+        return (small ? static_storage.begin() : s.data_.get());
     }
     iterator my_end() {
         return my_begin() + size_;
     }
     iterator begin() {
-        if (!small && s->counter > 1)
-            realloc(s->capacity, my_begin(), my_end(), s);
-        return (small ? static_storage.begin() : s->data_);
+        update_before_changes();
+        return (small ? static_storage.begin() : s.data_.get());
     }
 
     iterator end() {
@@ -193,7 +186,7 @@ struct socow_vector {
     }
 
     const_iterator begin() const noexcept {
-        return (small ? static_storage.begin() : s->data_);
+        return (small ? static_storage.begin() : s.data_.get());
     }
 
     const_iterator end() const noexcept {
@@ -216,9 +209,7 @@ struct socow_vector {
     iterator erase(const_iterator first, const_iterator last) {
         size_t start = first - my_begin();
         size_t ending = last - my_begin();
-        if (!small && s->counter > 1) {
-            realloc(s->capacity, my_begin(), my_end(), s);
-        }
+        update_before_changes();
         for (T* it = my_begin() + ending; it < my_end(); it++) {
             std::swap(*it, *(it - (ending - start)));
         }
@@ -229,6 +220,26 @@ struct socow_vector {
     }
 
 private:
+    void update_before_changes() {
+        if (!small && !s.data_.unique())
+            realloc(s.capacity, my_begin(), my_end(), s);
+    }
+    void big_to_small() {
+        storage tmp = s;
+        s.data_.~shared_ptr();
+        try {
+            copy(tmp.data_.get(), tmp.data_.get() + size_, static_storage.begin());
+        } catch (...) {
+            new(&s.data_) std::shared_ptr<T>(tmp.data_);
+            s.capacity = tmp.capacity;
+            throw;
+        }
+        destruct_range(tmp.data_.get(), tmp.data_.get() + size_);
+        small = true;
+    }
+    bool is_small() {
+        return size_ < SMALL_SIZE;
+    }
     void copy(T* start, T* ending, T* destination) {
         for (T* it = start; it < ending; it++) {
             try {
@@ -240,21 +251,19 @@ private:
         }
     }
     void swap_small_big(socow_vector& sm, socow_vector& big) {
-        storage<T>* tmp = big.s;
+        storage tmp = big.s;
+        big.s.data_ = nullptr;
         try {
             copy(sm.static_storage.begin(), sm.static_storage.begin() + sm.size_, big.static_storage.begin());
         } catch (...) {
-            big.s = tmp;
+            new(&big.s) storage(tmp);
             throw;
         }
         destruct_range(sm.my_begin(), sm.my_end());
-        sm.s = tmp;
+        new(&sm.s) storage(tmp);
     }
-    void realloc(size_t new_capacity, iterator start, iterator e, storage<T>*& st) {
+    void realloc(size_t new_capacity, iterator start, iterator e, storage& st) {
         if (new_capacity == 0) {
-            if (st->counter == 1) {
-                st->~storage();
-            }
             small = true;
             return;
         }
@@ -266,15 +275,16 @@ private:
             operator delete(new_data);
             throw;
         }
-        if (st->data_ != nullptr && st->counter == 1) {
-            destruct_range(st->data_, st->data_ + size_);
-            operator delete(st->data_);
-        } else if (st->data_ != nullptr){
-            st->counter--;
-            st = new storage<T>;
+        if (st.data_.unique()) {
+            if (st.data_ != nullptr) {
+                destruct_range(st.data_.get(), st.data_.get() + size_);
+                st.data_.~shared_ptr();
+            }
+            new(&st.data_) std::shared_ptr<T>(new_data, deleter());
+        } else {
+            st.data_ = std::shared_ptr<T>(new_data, deleter());
         }
-        st->data_ = new_data;
-        st->capacity = new_capacity;
+        st.capacity = new_capacity;
     }
     static void destruct_range(T* start, T* end) noexcept {
         if (start == nullptr || end == nullptr) {
@@ -284,9 +294,18 @@ private:
             it->~T();
         }
     }
+    struct storage {
+        size_t capacity{0};
+        std::shared_ptr<T> data_{nullptr};
+    };
     union {
         std::array<T, SMALL_SIZE> static_storage;
-        storage<T>* s;
+        storage s;
+    };
+    struct deleter {
+        void operator()(T* ptr) {
+            operator delete(ptr);
+        }
     };
     size_t size_;
     bool small;
